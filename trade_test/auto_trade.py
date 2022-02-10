@@ -36,10 +36,12 @@ def auto_trade_slow(side,margin_mount=1,quote_size=10000):
             break
     return_margin(SETTING["ADDRESS_ROBOT"])
 
+# 返还用户保证金
 def return_margin(trader,trader_key):
     user_wthdrawAble = margin_test.getWithdrawable(trader)
     margin_test.removeMargin(trader=trader,trader_key=trader_key,withdrawAmount=user_wthdrawAble)
 
+# 根据输入的margin，计算用户的最大可开仓量
 def get_max_position(margin_amount,margin_rate):
     beta = config_test.getBeta()
     reserves = amm_test.getReserves(is_print=False)
@@ -51,19 +53,28 @@ def get_max_position(margin_amount,margin_rate):
     v_3 = -1/(v_1+v_2)
     return v_3
 
-# 使用机器人砸低市价
+# 使用用户B将场内价格拉至清算价格
 def price_increase(target_price,market_price,side):
     reserves = amm_test.getReserves()
     amm_x = reserves[0]
     amm_y = reserves[1]
     amm_l = (amm_x/(10**18))*(amm_y/(10**6))
-    quote_amount = math.sqrt(amm_l)*(math.sqrt(target_price)-math.sqrt(market_price))
-    tx_hash_openPosition=router_test.openPositionRouter(side=side, marginAmount=20000, quoteAmount=int(abs(quote_amount)) + 1,trader=SETTING["ADDRESS_ROBOT"],trader_key=SETTING["PRIVATE_KEY_ROBOT"])
-    w3.eth.waitForTransactionReceipt(tx_hash_openPosition.hex())
-    position_info = margin_test.getPosition(trader=SETTING["ADDRESS_ROBOT"])
-    print("机器人仓位：",position_info)
-    return tx_hash_openPosition.hex()
+    if side == 0:
+        quote_amount = math.sqrt(amm_l)*(math.sqrt(target_price)-math.sqrt(market_price))
+        tx_hash_openPosition=router_test.openPositionRouter(side=1, marginAmount=20000, quoteAmount=int(abs(quote_amount)) + 1,trader=SETTING["ADDRESS_ROBOT"],trader_key=SETTING["PRIVATE_KEY_ROBOT"])
+        w3.eth.waitForTransactionReceipt(tx_hash_openPosition.hex())
+        position_info = margin_test.getPosition(trader=SETTING["ADDRESS_ROBOT"])
+        print("机器人仓位：",position_info)
+        return tx_hash_openPosition.hex()
+    else:
+        quote_amount = math.sqrt(amm_l)*(math.sqrt(market_price)-math.sqrt(target_price))
+        tx_hash_openPosition=router_test.openPositionRouter(side=0, marginAmount=20000, quoteAmount=int(abs(quote_amount)) + 1,trader=SETTING["ADDRESS_ROBOT"],trader_key=SETTING["PRIVATE_KEY_ROBOT"])
+        w3.eth.waitForTransactionReceipt(tx_hash_openPosition.hex())
+        position_info = margin_test.getPosition(trader=SETTING["ADDRESS_ROBOT"])
+        print("机器人仓位：",position_info)
+        return tx_hash_openPosition.hex()
 
+# 获取Amm流动性
 def get_amml():
     reserves = amm_test.getReservesAccurate()
     amm_x = reserves[0]
@@ -79,13 +90,14 @@ def liquidate(trader,trader_key):
     print('>>>>>>begin liquidate')
     return margin_test.toliquidate(trader=trader,trader_key=trader_key)
 
+# 根据用户要开的仓位quote_
 def get_margin_acc(quoteAmount,vUSD,market_price):
     beta = config_test.getBeta()
     v_1 = 2.0*beta/vUSD
     v_2 = 1/((1/quoteAmount-v_1)*market_price*10)
     return abs(v_2)
 
-# 计算仓位的清算价格
+# 计算仓位的清算价格 多空的计算方式相同
 def get_liquidate_price(trader):
     beta = config_test.getBeta()
     position_info = margin_test.getPositionAccurate(trader)
@@ -98,10 +110,10 @@ def get_liquidate_price(trader):
     return liquidate_price
 
 
-# check amm
-def check_liquidate():
-    percent_list = [0.01,0.02,0.04,0.06,0.08,0.1,0.12,0.14]
-    # percent_list = [0.01]
+# check amm 盈亏
+def check_liquidate(side):
+    # percent_list = [0.01,0.02,0.04,0.06,0.08,0.1,0.12,0.14]
+    percent_list = [0.01]
     for i in percent_list:
         print('>>>>>>>>>>>>>>>>>>>>>>>开仓量为总流动行性的%f'%i,'>>>>>>>>>>>>>>>>>>>>>>>>>>')
         # 检查Amm池子的状况
@@ -114,13 +126,11 @@ def check_liquidate():
         market_price = reserves[1]/reserves[0]*(10**12)
         print("market_price:",market_price)
         # 使用用户A10倍杠杆开多
-        # marginAmount = round(amm_x_first*i/(10**21),2)
         quoteAmount = int(abs(math.sqrt(amm_l)*i))
         marginAmount = round(get_margin_acc(quoteAmount,amm_y_first/(10**6),market_price),2)
         print("margin:",marginAmount,"    quote_size:",quoteAmount)
-        router_test.openPositionRouter(side=0, marginAmount=marginAmount, quoteAmount=quoteAmount,trader=SETTING["ADDRESS_USER"],trader_key=SETTING["PRIVATE_KEY_USER"])
+        router_test.openPositionRouter(side=side, marginAmount=marginAmount, quoteAmount=quoteAmount,trader=SETTING["ADDRESS_USER"],trader_key=SETTING["PRIVATE_KEY_USER"])
         print("用户A仓位:",margin_test.getPosition(SETTING["ADDRESS_USER"]))
-        time.sleep(5)
         # 检查Amm池子的状况
         reserves =  amm_test.getReserves(is_print=True)
         # 计算当前价格
@@ -129,12 +139,12 @@ def check_liquidate():
         # 计算用户A的清算价格
         target_price = get_liquidate_price(trader=SETTING["ADDRESS_USER"])
         # 将场内价格砸至用户a的清算价格
-        price_increase(target_price=abs(target_price),market_price=abs(market_price),side=1)
+        price_increase(target_price=abs(target_price),market_price=abs(market_price),side=side)
         # 将用户A的仓位清算
         tx_hash = liquidate(trader=SETTING["ADDRESS_USER"],trader_key=SETTING["PRIVATE_KEY_USER"])
         liquidate_fee = trade_fee.get_trade_fee(tx_id=tx_hash,is_liquidate=True)*0.001
         # 检查Amm池子的状况
-        # amm_test.getReserves(is_print=True)
+        amm_test.getReserves(is_print=True)
         # 将机器人的仓位平仓
         quoteAmount = margin_test.getPositionAccurate(trader=SETTING["ADDRESS_ROBOT"])[1]
         tx_id = margin_test.closePosition(trader=SETTING["ADDRESS_ROBOT"],trader_key=SETTING["PRIVATE_KEY_ROBOT"],quoteAmount=abs(quoteAmount))
@@ -154,5 +164,6 @@ def check_liquidate():
 
 
 if __name__ == '__main__':
-    check_liquidate()
+    check_liquidate(0)
     # get_liquidate_price(trader=SETTING["ADDRESS_USER"], beta=1)
+    # print(math.sqrt(get_amml()))
